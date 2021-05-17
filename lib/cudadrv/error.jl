@@ -26,18 +26,12 @@ Base.:(==)(x::CuError,y::CuError) = x.code == y.code
 
 Gets the string representation of an error code.
 
-This name can often be used as a symbol in source code to get an instance of this error.
-For example:
-
 ```jldoctest
-julia> err = CuError(1)
-CuError(1, ERROR_INVALID_VALUE)
+julia> err = CuError(CUDA.cudaError_enum(1))
+CuError(CUDA_ERROR_INVALID_VALUE)
 
 julia> name(err)
 "ERROR_INVALID_VALUE"
-
-julia> ERROR_INVALID_VALUE
-CuError(1, ERROR_INVALID_VALUE)
 ```
 """
 function name(err::CuError)
@@ -62,9 +56,9 @@ function description(err::CuError)
 end
 
 function Base.showerror(io::IO, err::CuError)
-    if functional() && CuCurrentContext() !== nothing
+    try
         print(io, "CUDA error: $(description(err)) (code $(reinterpret(Int32, err.code)), $(name(err)))")
-    else
+    catch
         # we might throw before the library is initialized
         print(io, "CUDA error (code $(reinterpret(Int32, err.code)), $(err.code))")
     end
@@ -82,25 +76,17 @@ Base.show(io::IO, ::MIME"text/plain", err::CuError) = print(io, "CuError($(err.c
 
 ## API call wrapper
 
-"""
-    initializer(f::Function)
-
-Register a function to be called before making a CUDA API call that requires an initialized
-context.
-"""
-initializer(f::Function) = (api_initializer[] = f; nothing)
-const api_initializer = Union{Nothing,Function}[nothing]
-
 # outlined functionality to avoid GC frame allocation
 @noinline function initialize_api()
-    hook = @inbounds api_initializer[]
-    if hook !== nothing
-        hook()
-    end
+    prepare_cuda_state()
     return
 end
 @noinline function throw_api_error(res)
-    throw(CuError(res))
+    if res == ERROR_OUT_OF_MEMORY
+        throw(OutOfGPUMemoryError())
+    else
+        throw(CuError(res))
+    end
 end
 
 macro check(ex)
@@ -110,6 +96,6 @@ macro check(ex)
             throw_api_error(res)
         end
 
-        return
+        nothing
     end
 end

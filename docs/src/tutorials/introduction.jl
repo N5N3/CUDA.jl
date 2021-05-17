@@ -57,7 +57,6 @@ sequential_add!(y, x)
 
 # And now a parallel implementation:
 
-# parallel implementation
 function parallel_add!(y, x)
     Threads.@threads for i in eachindex(y, x)
         @inbounds y[i] += x[i]
@@ -225,7 +224,7 @@ end
 #
 # replacing the `/path/to/julia` with the path to your Julia binary. Note that we don't
 # immediately start the profiler, but instead call into the CUDA APIs and manually start the
-# profiler with `CUDq.@profile` (thus excluding the time to compile our kernel):
+# profiler with `CUDA.@profile` (thus excluding the time to compile our kernel):
 
 bench_gpu1!(y_d, x_d)  # run it once to force compilation
 CUDA.@profile bench_gpu1!(y_d, x_d)
@@ -329,10 +328,7 @@ end
 
 function gpu_add3!(y, x)
     index = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    stride = blockDim().x * gridDim().x
-    for i = index:stride:length(y)
-        @inbounds y[i] += x[i]
-    end
+    @inbounds y[index] += x[index]
     return
 end
 

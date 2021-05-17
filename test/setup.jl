@@ -10,8 +10,21 @@ testf(f, xs...; kwargs...) = TestSuite.compare(f, CuArray, xs...; kwargs...)
 
 using Random
 
-# detect cuda-memcheck
-const memcheck = haskey(ENV, "CUDA_MEMCHECK")
+# detect compute-sanitizer, to disable incompatible tests (e.g. using CUPTI),
+# and to skip tests that are known to generate innocuous API errors
+const sanitize = any(contains("NV_SANITIZER"), keys(ENV))
+macro not_if_sanitize(ex)
+    sanitize || return esc(ex)
+    quote
+        @test_skip $ex
+    end
+end
+
+# precompile the runtime library
+CUDA.precompile_runtime()
+
+# for when we include tests directly
+CUDA.allowscalar(false)
 
 
 ## entry point
@@ -40,16 +53,16 @@ function runtests(f, name, time_source=:cuda, snoop=nothing)
             CUDA.allowscalar(false)
 
             if $(QuoteNode(time_source)) == :cuda
-                CUDA.@timed @testset $"$name" begin
+                CUDA.@timed @testset $name begin
                     $f()
                 end
             elseif $(QuoteNode(time_source)) == :julia
-                res = @timed @testset $"$name" begin
+                res = @timed @testset $name begin
                     $f()
                 end
                 res..., 0, 0, 0
             else
-                error($"Unknown time source: ",$(QuoteNode(time_source)))
+                error("Unknown time source: " * $(string(time_source)))
             end
         end
         data = Core.eval(mod, ex)
@@ -90,7 +103,7 @@ function runtests(f, name, time_source=:cuda, snoop=nothing)
         end
         res = vcat(collect(data), cpu_rss, gpu_rss)
 
-        device_reset!()
+        CUDA.can_reset_device() && device_reset!()
         res
     finally
         if snoop !== nothing
@@ -113,6 +126,9 @@ macro grab_output(ex)
             open(fname, "w") do fout
                 redirect_stdout(fout) do
                     ret = $(esc(ex))
+
+                    # NOTE: CUDA requires a 'proper' sync to flush its printf buffer
+                    device_synchronize()
                 end
             end
             ret, read(fname, String)
@@ -141,20 +157,21 @@ end
 
 # @test_throw, with additional testing for the exception message
 macro test_throws_message(f, typ, ex...)
+    @gensym msg
     quote
-        msg = ""
+        $msg = ""
         @test_throws $(esc(typ)) try
             $(esc(ex...))
         catch err
-            msg = sprint(showerror, err)
+            $msg = sprint(showerror, err)
             rethrow()
         end
 
-        if !$(esc(f))(msg)
+        if !$(esc(f))($msg)
             # @test should return its result, but doesn't
-            @error "Failed to validate error message\n$msg"
+            @error "Failed to validate error message\n" * $msg
         end
-        @test $(esc(f))(msg)
+        @test $(esc(f))($msg)
     end
 end
 
@@ -164,15 +181,19 @@ macro test_throws_macro(ty, ex)
         Test.@test_throws $(esc(ty)) try
             $(esc(ex))
         catch err
-            @test err isa LoadError
-            @test err.file === $(string(__source__.file))
-            @test err.line === $(__source__.line + 1)
-            rethrow(err.error)
+            if VERSION < v"1.7-"
+                @test err isa LoadError
+                @test err.file === $(string(__source__.file))
+                @test err.line === $(__source__.line + 1)
+                rethrow(err.error)
+            else
+                rethrow(err)
+            end
         end
     end
 end
 
-# Run some code on-device, returning captured standard output
+# Run some code on-device
 macro on_device(ex)
     @gensym kernel
     esc(quote
@@ -182,8 +203,7 @@ macro on_device(ex)
                 return
             end
 
-            @cuda $kernel()
-            synchronize()
+            CUDA.@sync @cuda $kernel()
         end
     end)
 end
@@ -210,7 +230,7 @@ function julia_script(code, args=``)
     if Base.JLOptions().project != C_NULL
         cmd = `$cmd --project=$(unsafe_string(Base.JLOptions().project))`
     end
-    cmd = `$cmd --eval $script $args`
+    cmd = `$cmd --color=no --eval $script $args`
 
     out = Pipe()
     err = Pipe()

@@ -4,17 +4,29 @@ using ..APIUtils
 
 using ..CUDA
 using ..CUDA: CUstream, cuComplex, cuDoubleComplex, libraryPropertyType, cudaDataType
-using ..CUDA: libcusparse, unsafe_free!, @retry_reclaim
+using ..CUDA: libcusparse, unsafe_free!, @retry_reclaim, @context!
 
 using CEnum
 
+using Memoize
+
+using LinearAlgebra
+using LinearAlgebra: HermOrSym
+
+using Adapt
+
+using DataStructures
+
+using SparseArrays
+
 const SparseChar = Char
+
 
 # core library
 include("libcusparse_common.jl")
 include("error.jl")
 include("libcusparse.jl")
-include("libcusparse_old.jl")
+include("libcusparse_deprecated.jl")
 
 include("array.jl")
 include("util.jl")
@@ -33,42 +45,34 @@ include("generic.jl")
 # high-level integrations
 include("interfaces.jl")
 
-# thread cache for task-local library handles
-const thread_handles = Vector{Union{Nothing,cusparseHandle_t}}()
+# cache for created, but unused handles
+const idle_handles = HandleCache{CuContext,cusparseHandle_t}()
 
 function handle()
-    tid = Threads.threadid()
-    if @inbounds thread_handles[tid] === nothing
-        ctx = context()
-        thread_handles[tid] = get!(task_local_storage(), (:CUSPARSE, ctx)) do
-            handle = cusparseCreate()
-            cusparseSetStream(handle, CuStreamPerThread())
-            finalizer(current_task()) do task
-                CUDA.isvalid(ctx) || return
-                context!(ctx) do
-                    cusparseDestroy(handle)
-                end
-            end
-
-            handle
+    state = CUDA.active_state()
+    handle, stream = get!(task_local_storage(), (:CUSPARSE, state.context)) do
+        new_handle = pop!(idle_handles, state.context) do
+            cusparseCreate()
         end
-    end
-    @inbounds thread_handles[tid]
-end
 
-function __init__()
-    resize!(thread_handles, Threads.nthreads())
-    fill!(thread_handles, nothing)
+        finalizer(current_task()) do task
+            push!(idle_handles, state.context, new_handle) do
+                @context! skip_destroyed=true state.context cusparseDestroy(new_handle)
+            end
+        end
+        # TODO: cusparseDestroy to preserve memory, or at exit?
 
-    CUDA.atdeviceswitch() do
-        tid = Threads.threadid()
-        thread_handles[tid] = nothing
+        cusparseSetStream(new_handle, state.stream)
+
+        new_handle, state.stream
+    end::Tuple{cusparseHandle_t,CuStream}
+
+    if stream != state.stream
+        cusparseSetStream(handle, state.stream)
+        task_local_storage((:CUSPARSE, state.context), (handle, state.stream))
     end
 
-    CUDA.attaskswitch() do
-        tid = Threads.threadid()
-        thread_handles[tid] = nothing
-    end
+    return handle
 end
 
 end

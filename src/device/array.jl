@@ -59,6 +59,8 @@ Base.elsize(::Type{<:CuDeviceArray{T}}) where {T} = sizeof(T)
 Base.size(g::CuDeviceArray) = g.shape
 Base.length(g::CuDeviceArray) = prod(g.shape)
 
+Base.sizeof(x::CuDeviceArray) = Base.elsize(x) * length(x)
+
 
 ## conversions
 
@@ -139,12 +141,6 @@ Base.show(io::IO, a::CuDeviceArray) =
     print(io, "$(join(a.shape, '×')) device array at $(pointer(a))")
 
 Base.show(io::IO, mime::MIME"text/plain", a::CuDeviceArray) = show(io, a)
-
-@inline function Base.unsafe_view(A::CuDeviceVector{T}, I::Vararg{Base.ViewIndex,1}) where {T}
-    ptr = pointer(A, I[1].start)
-    len = I[1].stop - I[1].start + 1
-    return CuDeviceArray(len, ptr)
-end
 
 @inline function Base.iterate(A::CuDeviceArray, i=1)
     if (i % UInt) - 1 < length(A)

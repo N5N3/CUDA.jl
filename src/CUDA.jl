@@ -14,6 +14,12 @@ using Requires
 
 using LinearAlgebra
 
+using BFloat16s
+
+using Memoize
+
+using ExprTools
+
 
 ## source code includes
 
@@ -34,12 +40,18 @@ include("../deps/compatibility.jl")
 include("../deps/bindeps.jl")
 
 # device functionality (needs to be loaded first, because of generated functions)
+include("device/utils.jl")
 include("device/pointer.jl")
 include("device/array.jl")
 include("device/intrinsics.jl")
 include("device/llvm.jl")
 include("device/runtime.jl")
 include("device/texture.jl")
+include("device/random.jl")
+
+# array essentials
+include("pool.jl")
+include("array.jl")
 
 # compiler libraries
 include("../lib/cupti/CUPTI.jl")
@@ -52,11 +64,8 @@ include("compiler/execution.jl")
 include("compiler/exceptions.jl")
 include("compiler/reflection.jl")
 
-# array abstraction
-include("pool.jl")
-include("array.jl")
+# array implementation
 include("gpuarrays.jl")
-include("subarray.jl")
 include("utilities.jl")
 include("texture.jl")
 
@@ -77,11 +86,11 @@ include("indexing.jl")
 include("broadcast.jl")
 include("mapreduce.jl")
 include("accumulate.jl")
+include("reverse.jl")
 include("linalg.jl")
-include("nnlib.jl")
 include("iterator.jl")
-include("statistics.jl")
 include("random.jl")
+include("sorting.jl")
 
 # other libraries
 include("../lib/nvml/NVML.jl")
@@ -89,8 +98,5 @@ const has_nvml = NVML.has_nvml
 export NVML, has_nvml
 
 include("deprecated.jl")
-
-include("precompile.jl")
-_precompile_()
 
 end

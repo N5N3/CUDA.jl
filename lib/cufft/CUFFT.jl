@@ -4,11 +4,14 @@ using ..APIUtils
 
 using ..CUDA
 using ..CUDA: CUstream, cuComplex, cuDoubleComplex, libraryPropertyType
-import ..CUDA: libcufft, unsafe_free!, @retry_reclaim
+using ..CUDA: libcufft, unsafe_free!, @retry_reclaim, @context!
 
 using CEnum
 
 using Reexport
+
+using Memoize
+
 
 # core library
 include("libcufft_common.jl")

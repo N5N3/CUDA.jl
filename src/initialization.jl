@@ -16,30 +16,31 @@ fail to check whether CUDA is functional, actual use of functionality might warn
 """
 function functional(show_reason::Bool=false)
     if configured[] < 0
-        _functional(show_reason)
+        Bool(_functional(show_reason))
+    else
+        Bool(configured[])
     end
-    Bool(configured[])
 end
 
 const configure_lock = ReentrantLock()
 @noinline function _functional(show_reason::Bool=false)
-    lock(configure_lock) do
+    Base.@lock configure_lock begin
         if configured[] == -1
             configured[] = -2
-            if __configure__(show_reason)
-                configured[] = 1
-                try
-                    __runtime_init__()
-                catch
-                    configured[] = 0
-                    rethrow()
-                end
-            else
-                configured[] = 0
+            configured[] = try
+                __runtime_init__()
+                1
+            catch ex
+                show_reason && @error("Error during initialization of CUDA.jl", exception=(ex,catch_backtrace()))
+                0
             end
         elseif configured[] == -2
-            @warn "Recursion during initialization of CUDA.jl"
-            configured[] = 0
+            # claim that we're initialized _during_ initialization (this can only happen
+            # on the same task that's currently initializing, due to the reentrant lock)
+            1
+        else
+            # we got stuck on the lock while another thread was initializing
+            configured[]
         end
     end
 end
@@ -47,7 +48,11 @@ end
 # macro to guard code that only can run after the package has successfully initialized
 macro after_init(ex)
     quote
-        @assert functional(true) "CUDA.jl did not successfully initialize, and is not usable."
+        if !functional(true)
+            error("""CUDA.jl did not successfully initialize, and is not usable.
+                     If you did not see any other error message, try again in a new session
+                     with the JULIA_DEBUG environment variable set to 'CUDA'.""")
+        end
         $(esc(ex))
     end
 end
@@ -55,7 +60,7 @@ end
 
 ## deferred initialization API
 
-const __libcuda = Sys.iswindows() ? :nvcuda : :libcuda
+const __libcuda = Sys.iswindows() ? "nvcuda" : ( Sys.islinux() ? "libcuda.so.1" : "libcuda" )
 libcuda() = @after_init(__libcuda)
 
 # load-time initialization: only perform mininal checks here
@@ -67,42 +72,39 @@ function __init__()
     # enable generation of FMA instructions to mimic behavior of nvcc
     LLVM.clopts("-nvptx-fma-level=1")
 
-    resize!(thread_state, Threads.nthreads())
-    fill!(thread_state, nothing)
-
-    resize!(thread_tasks, Threads.nthreads())
-    fill!(thread_tasks, nothing)
-
-    initializer(prepare_cuda_call)
-
-    @require ForwardDiff="f6369f11-7733-5829-9624-2563aa707210" include("forwarddiff.jl")
-end
-
-# run-time configuration: try and initialize CUDA, but don't error
-function __configure__(show_reason::Bool)
-    if haskey(ENV, "_") && basename(ENV["_"]) == "rr"
-        show_reason && @error("Running under rr, which is incompatible with CUDA")
-        return false
+    # ensure that operations executed by the REPL back-end finish before returning,
+    # because displaying values happens on a different task (CUDA.jl#831)
+    if isdefined(Base, :active_repl_backend)
+        push!(Base.active_repl_backend.ast_transforms, ex->
+            quote
+                try
+                    $(ex)
+                finally
+                    $configured[] == 1 && $synchronize()
+                end
+            end
+        )
     end
 
-    try
-        @debug "Initializing CUDA driver"
-        res = @runtime_ccall((:cuInit, __libcuda), CUresult, (UInt32,), 0)
-        if res == 0xffffffff
-            error("Cannot use the CUDA stub libraries. You either don't have the NVIDIA driver installed, or it is not properly discoverable.")
-        elseif res != SUCCESS
-            throw_api_error(res)
-        end
-    catch ex
-        show_reason && @error("Could not initialize CUDA", exception=(ex,catch_backtrace()))
-        return false
+    precompiling = ccall(:jl_generating_output, Cint, ()) != 0
+    if !precompiling
+        eval(overrides)
     end
-
-    return true
 end
 
-# run-time initialization: we have a driver, so try and discover CUDA
 function __runtime_init__()
+    if haskey(ENV, "_") && basename(ENV["_"]) == "rr"
+        error("Running under rr, which is incompatible with CUDA")
+    end
+
+    @debug "Initializing CUDA driver"
+    res = ccall((:cuInit, __libcuda), CUresult, (UInt32,), 0)
+    if res == 0xffffffff
+        error("Cannot use the CUDA stub libraries. You either don't have the NVIDIA driver installed, or it is not properly discoverable.")
+    elseif res != SUCCESS
+        throw_api_error(res)
+    end
+
     if version() < v"10.1"
         @warn "This version of CUDA.jl only supports NVIDIA drivers for CUDA 10.1 or higher (yours is for CUDA $(version()))"
     end
@@ -116,30 +118,14 @@ function __runtime_init__()
                  It is recommended to upgrade your driver, or switch to automatic installation of CUDA."""
     end
 
-    if has_cudnn()
-        cudnn_release = VersionNumber(CUDNN.version().major, CUDNN.version().minor)
-        if cudnn_release < v"8.0"
-            @warn "This version of CUDA.jl only supports CUDNN 8.0 or higher"
-        end
-    end
-
-    if has_cutensor()
-        cutensor_release = VersionNumber(CUTENSOR.version().major, CUTENSOR.version().minor)
-        if !(v"1.0" <= cutensor_release <= v"1.2")
-            @warn "This version of CUDA.jl only supports CUTENSOR 1.0 to 1.2"
-        end
-    end
-
-    resize!(device_contexts, ndevices())
-    fill!(device_contexts, nothing)
+    resize!(__device_contexts, ndevices())
+    fill!(__device_contexts, nothing)
 
     __init_compatibility__()
 
     __init_pool__()
 
     CUBLAS.__runtime_init__()
-    has_cudnn() && CUDNN.__runtime_init__()
-
     return
 end
 

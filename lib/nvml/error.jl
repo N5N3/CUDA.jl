@@ -24,7 +24,11 @@ end
 const initialized = Ref(false)
 function initialize_api()
     if !initialized[]
-        nvmlInit_v2()
+        res = unsafe_nvmlInitWithFlags(0)
+        if res !== NVML_SUCCESS
+            # NOTE: we can't call nvmlErrorString during initialization
+            error("NVML could not be initialized ($res)")
+        end
         atexit() do
             nvmlShutdown()
         end
@@ -39,6 +43,6 @@ macro check(ex)
             throw_api_error(res)
         end
 
-        return
+        nothing
     end
 end

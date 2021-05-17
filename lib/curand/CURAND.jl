@@ -8,6 +8,11 @@ using ..CUDA: libcurand, @retry_reclaim
 
 using CEnum
 
+using Memoize
+
+using DataStructures
+
+
 # core library
 include("libcurand_common.jl")
 include("error.jl")
@@ -19,57 +24,49 @@ include("wrappers.jl")
 # high-level integrations
 include("random.jl")
 
-# thread cache for task-local library handles
-const CURAND_THREAD_RNGs = Vector{Union{Nothing,RNG}}()
-const GPUARRAY_THREAD_RNGs = Vector{Union{Nothing,GPUArrays.RNG}}()
+# cache for created, but unused handles
+const idle_curand_rngs = HandleCache{CuContext,RNG}()
+const idle_gpuarray_rngs = HandleCache{CuContext,GPUArrays.RNG}()
 
 function default_rng()
-    tid = Threads.threadid()
-    if @inbounds CURAND_THREAD_RNGs[tid] === nothing
-        ctx = context()
-        CURAND_THREAD_RNGs[tid] = get!(task_local_storage(), (:CURAND, ctx)) do
-            rng = RNG()
-            Random.seed!(rng)
-            rng
+    state = CUDA.active_state()
+    rng = get!(task_local_storage(), (:CURAND, state.context)) do
+        new_rng = pop!(idle_curand_rngs, state.context) do
+            RNG()
         end
-    end
-    @inbounds CURAND_THREAD_RNGs[tid]
+
+        finalizer(current_task()) do task
+            push!(idle_curand_rngs, state.context, new_rng) do
+                # no need to do anything, as the RNG is collected by its finalizer
+            end
+        end
+
+        Random.seed!(new_rng)
+        new_rng
+    end::RNG
+
+    return rng
 end
 
 function GPUArrays.default_rng(::Type{<:CuArray})
-    tid = Threads.threadid()
-    if @inbounds GPUARRAY_THREAD_RNGs[tid] === nothing
-        ctx = context()
-        GPUARRAY_THREAD_RNGs[tid] = get!(task_local_storage(), (:GPUArraysRNG, ctx)) do
+    ctx = context()
+    get!(task_local_storage(), (:GPUArraysRNG, ctx)) do
+        rng = pop!(idle_gpuarray_rngs, ctx) do
             dev = device()
             N = attribute(dev, DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
             state = CuArray{NTuple{4, UInt32}}(undef, N)
-            rng = GPUArrays.RNG(state)
-            Random.seed!(rng)
-            rng
+            GPUArrays.RNG(state)
         end
-    end
-    @inbounds GPUARRAY_THREAD_RNGs[tid]
-end
 
-function __init__()
-    resize!(CURAND_THREAD_RNGs, Threads.nthreads())
-    fill!(CURAND_THREAD_RNGs, nothing)
+        finalizer(current_task()) do task
+            push!(idle_gpuarray_rngs, ctx, rng) do
+                # no need to do anything, as the RNG is collected by its finalizer
+            end
+        end
 
-    resize!(GPUARRAY_THREAD_RNGs, Threads.nthreads())
-    fill!(GPUARRAY_THREAD_RNGs, nothing)
-
-    CUDA.atdeviceswitch() do
-        tid = Threads.threadid()
-        CURAND_THREAD_RNGs[tid] = nothing
-        GPUARRAY_THREAD_RNGs[tid] = nothing
-    end
-
-    CUDA.attaskswitch() do
-        tid = Threads.threadid()
-        CURAND_THREAD_RNGs[tid] = nothing
-        GPUARRAY_THREAD_RNGs[tid] = nothing
-    end
+        Random.seed!(rng)
+        rng
+    end::GPUArrays.RNG
 end
 
 @deprecate seed!() CUDA.seed!()

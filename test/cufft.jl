@@ -69,6 +69,17 @@ end
 
 @testset for T in [ComplexF32, ComplexF64]
 
+@testset "simple" begin
+    @testset "$(n)D" for n = 1:3
+        dims = ntuple(i -> 40, n)
+        @test testf(fft!, rand(T, dims))
+        @test testf(ifft!, rand(T, dims))
+
+        @test testf(fft, rand(T, dims))
+        @test testf(ifft, rand(T, dims))
+    end
+end
+
 @testset "1D" begin
     dims = (N1,)
     X = rand(T, dims)
@@ -291,11 +302,4 @@ end
     out_of_place(X)
 end
 
-end
-
-
-@testset "streams" begin
-    X = rand(N1)
-    d_X = CuArray(X)
-    p = plan_fft(d_X)
 end

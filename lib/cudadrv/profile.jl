@@ -34,12 +34,14 @@ profiling is already enabled, then this call has no effect.
 """
 function start()
     if nsight[] !== nothing
-        run(`$(nsight[]) start`)
+        run(`$(nsight[]) start --capture-range=cudaProfilerApi`)
+        # it takes a while for the profiler to actually start tracing our process
+        sleep(0.01)
     else
         @warn("""Calling CUDA.@profile only informs an external profiler to start.
-                 The user is responsible for launching Julia under a CUDA profiler like `nvprof`.
+                 The user is responsible for launching Julia under a CUDA profiler.
 
-                 For improved usability, launch Julia under the Nsight Systems profiler:
+                 It is recommended to use Nsight Systems, which supports interactive profiling:
                  \$ nsys launch julia""",
               maxlog=1)
     end
@@ -53,16 +55,11 @@ Disables profile collection by the active profiling tool for the current context
 profiling is already disabled, then this call has no effect.
 """
 function stop()
+    CUDA.cuProfilerStop()
     if nsight[] !== nothing
         run(`$(nsight[]) stop`)
         @info "Profiling has finished, open the report listed above with `nsight-sys`"
-    else
-        CUDA.cuProfilerStop()
     end
-end
-
-if haskey(ENV, "NSYS_PROFILING_SESSION_ID") && ccall(:jl_generating_output, Cint, ()) == 1
-    @warn "Precompiling while running under Nsight Systems; if you encounter segmentation faults (exit code 11), try disabling OSRT tracing."
 end
 
 function __init__()

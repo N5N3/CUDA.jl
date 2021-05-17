@@ -16,8 +16,8 @@ group["construct"] = @benchmarkable CuArray{Int}(undef, 1)
 
 group["copy"] = @async_benchmarkable copy($gpu_mat)
 
+gpu_mat2 = copy(gpu_mat)
 let group = addgroup!(group, "copyto!")
-    gpu_mat2 = copy(gpu_mat)
     group["cpu_to_gpu"] = @async_benchmarkable copyto!($gpu_mat, $cpu_mat)
     group["gpu_to_cpu"] = @async_benchmarkable copyto!($cpu_mat, $gpu_mat)
     group["gpu_to_gpu"] = @async_benchmarkable copyto!($gpu_mat2, $gpu_mat)
@@ -89,4 +89,10 @@ let group = addgroup!(group, "random")
         group["Float32"] = @async_benchmarkable CUDA.randn!($gpu_vec)
         #group["Int64"] = @async_benchmarkable CUDA.randn!($gpu_vec_ints)
     end
+end
+
+let group = addgroup!(group, "sorting")
+    group["1d"] = @async_benchmarkable sort($gpu_vec)
+    group["2d"] = @async_benchmarkable sort($gpu_mat; dims=1)
+    group["by"] = @async_benchmarkable sort($gpu_vec; by=sin)
 end

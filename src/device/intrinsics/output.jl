@@ -9,7 +9,7 @@ export @cuprintf
     # > automatically promoted to double. Therefore, varargs functions will never receive
     # > arguments of type char, short int, or float.
 
-    if arg == Cchar || arg == Cshort
+    if arg == Cchar || arg == Cshort || arg == Cuchar || arg == Cushort
         return :(Cint(arg))
     elseif arg == Cfloat
         return :(Cdouble(arg))
@@ -93,9 +93,10 @@ export @cuprint, @cuprintln
 # simple conversions, defining an expression and the resulting argument type. nothing fancy,
 # `@cuprint` pretty directly maps to `@cuprintf`; we should just support `write(::IO)`.
 const cuprint_conversions = Dict(
-    Float32     => (x->:(Float64($x)),             Float64),
-    Ptr{<:Any}  => (x->:(convert(Ptr{Cvoid}, $x)), Ptr{Cvoid}),
-    Bool        => (x->:(Int32($x)),               Int32),
+    Float32         => (x->:(Float64($x)),                  Float64),
+    Ptr{<:Any}      => (x->:(convert(Ptr{Cvoid}, $x)),      Ptr{Cvoid}),
+    LLVMPtr{<:Any}  => (x->:(reinterpret(Ptr{Cvoid}, $x)),  Ptr{Cvoid}),
+    Bool            => (x->:(Int32($x)),                    Int32),
 )
 
 # format specifiers
@@ -114,6 +115,7 @@ const cuprint_specifiers = Dict(
     # other
     Cchar       => "%c",
     Ptr{Cvoid}  => "%p",
+    Cstring     => "%s",
 )
 
 @generated function _cuprint(parts...)
@@ -145,6 +147,22 @@ const cuprint_specifiers = Dict(
         if haskey(cuprint_specifiers, T)
             fmt *= cuprint_specifiers[T]
             push!(args, part)
+        elseif T <: Tuple
+            fmt *= "("
+            for (j, U) in enumerate(T.parameters)
+                if haskey(cuprint_specifiers, U)
+                    fmt *= cuprint_specifiers[U]
+                    push!(args, :($part[$j]))
+                    if j < length(T.parameters)
+                        fmt *= ", "
+                    elseif length(T.parameters) == 1
+                        fmt *= ","
+                    end
+                else
+                    @error("@cuprint does not support values of type $U")
+                end
+            end
+            fmt *= ")"
         elseif T <: String
             @error("@cuprint does not support non-literal strings")
         else
@@ -225,12 +243,12 @@ GPU analog of `Base.@show`. It comes with the same type restrictions as [`@cupri
 @cushow threadIdx().x
 ```
 """
-macro cushow(ex)
-    val = gensym("val")
-    s = string(ex)
-    quote
-        $val = $(esc(ex))
-        CUDA.@cuprintln($(Expr(:string, s, " = ", val)))
-        $val
+macro cushow(exs...)
+    blk = Expr(:block)
+    for ex in exs
+        push!(blk.args, :(CUDA.@cuprintln($(sprint(Base.show_unquoted,ex)*" = "),
+                                          begin local value = $(esc(ex)) end)))
     end
+    isempty(exs) || push!(blk.args, :value)
+    blk
 end

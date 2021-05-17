@@ -4,10 +4,16 @@ using CUDA
 CUDA.allowscalar(false)
 
 using BenchmarkTools
-BenchmarkTools.DEFAULT_PARAMETERS.evals = 0     # to find untuned benchmarks
 
 using StableRNGs
 rng = StableRNG(123)
+
+# we only submit results when running on the master branch
+real_run = get(ENV, "CODESPEED_BRANCH", nothing) == "master"
+if real_run
+    # to find untuned benchmarks
+    BenchmarkTools.DEFAULT_PARAMETERS.evals = 0
+end
 
 # convenience macro to create a benchmark that requires synchronizing the GPU
 macro async_benchmarkable(ex...)
@@ -24,45 +30,61 @@ SUITE = BenchmarkGroup()
 include("kernel.jl")
 include("array.jl")
 
-@info "Warming up"
-warmup(SUITE; verbose=false)
+if real_run
+    @info "Warming up"
+    warmup(SUITE; verbose=false)
 
-paramsfile = joinpath(first(DEPOT_PATH), "cache", "CUDA_benchmark_params.json")
-mkpath(dirname(paramsfile))
-if !isfile(paramsfile)
-    @warn "No saved parameters found, tuning all benchmarks"
-    tune!(SUITE)
-else
-    loadparams!(SUITE, BenchmarkTools.load(paramsfile)[1], :evals, :samples)
+    paramsfile = joinpath(first(DEPOT_PATH), "datadeps", "CUDA_benchmark_params.json")
+    # NOTE: using a path that survives across CI runs
+    mkpath(dirname(paramsfile))
+    if !isfile(paramsfile)
+        @warn "No saved parameters found, tuning all benchmarks"
+        tune!(SUITE)
+    else
+        loadparams!(SUITE, BenchmarkTools.load(paramsfile)[1], :evals, :samples)
 
-    # find untuned benchmarks for which we have the default evals==0
-    function find_untuned(group::BenchmarkGroup, untuned=Dict(), prefix="")
-        for (name, b) in group
-            find_untuned(b, untuned, isempty(prefix) ? name : "$prefix/$name")
+        # find untuned benchmarks for which we have the default evals==0
+        function find_untuned(group::BenchmarkGroup, untuned=Dict(), prefix="")
+            for (name, b) in group
+                find_untuned(b, untuned, isempty(prefix) ? name : "$prefix/$name")
+            end
+            return untuned
         end
-        return untuned
-    end
-    function find_untuned(b::BenchmarkTools.Benchmark, untuned=Dict(), prefix="")
-        if params(b).evals == 0
-            untuned[prefix] = b
+        function find_untuned(b::BenchmarkTools.Benchmark, untuned=Dict(), prefix="")
+            if params(b).evals == 0
+                untuned[prefix] = b
+            end
+            return untuned
         end
-        return untuned
-    end
-    untuned = find_untuned(SUITE)
+        untuned = find_untuned(SUITE)
 
-    if !isempty(untuned)
-        @info "Re-tuning the following benchmarks: $(join(keys(untuned), ", "))"
-        foreach(tune!, values(untuned))
+        if !isempty(untuned)
+            @info "Re-tuning the following benchmarks: $(join(keys(untuned), ", "))"
+            foreach(tune!, values(untuned))
+        end
     end
+    BenchmarkTools.save(paramsfile, params(SUITE))
+
+    # reclaim memory that might have been used by the tuning process
+    GC.gc(true)
+    CUDA.reclaim()
 end
-BenchmarkTools.save(paramsfile, params(SUITE))
 
 # latency benchmarks spawn external processes and take very long,
 # so don't benefit from warm-up or tuning.
 include("latency.jl")
 
+# integration tests are currently not part of the benchmark suite
+addgroup!(SUITE, "integration")
+
 @info "Running benchmarks"
 results = run(SUITE, verbose=true)
+
+# integration tests (that do nasty things, so need to be run last)
+results["integration"]["volumerhs"] = include("volumerhs.jl")
+results["integration"]["byval"] = include("byval.jl")
+results["integration"]["cudadevrt"] = include("cudadevrt.jl")
+
 println(results)
 
 
@@ -70,7 +92,7 @@ println(results)
 
 using JSON, HTTP
 
-if get(ENV, "CODESPEED_BRANCH", nothing) == "master"
+if real_run
     @info "Submitting to Codespeed..."
 
     basedata = Dict(

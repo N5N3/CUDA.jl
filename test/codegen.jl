@@ -66,7 +66,6 @@ end
     @test Array(out) == (_a .+ 1)
 end
 
-
 @testset "ptxas-compatible control flow" begin
     @noinline function throw_some()
         throw(42)
@@ -117,15 +116,32 @@ end
 
 ############################################################################################
 
-# NOTE: CUPTI, needed for SASS reflection, does not seem to work under cuda-memcheck
-memcheck || @testset "SASS" begin
+@testset "PTX" begin
+
+@testset "local memory stores due to byval" begin
+    # JuliaGPU/GPUCompiler.jl#92
+    function kernel(y1, y2)
+        y = threadIdx().x == 1 ? y1 : y2
+        @inbounds y[] = 0
+        return
+    end
+
+    asm = sprint(io->CUDA.code_ptx(io, kernel, NTuple{2,CuDeviceArray{Float32,1,AS.Global}}))
+    @test !occursin(".local", asm)
+end
+
+end
+
+############################################################################################
+
+@testset "SASS" begin
 
 @testset "basic reflection" begin
     valid_kernel() = return
     invalid_kernel() = 1
 
-    @test CUDA.code_sass(devnull, valid_kernel, Tuple{}) == nothing
-    @test_throws CUDA.KernelError CUDA.code_sass(devnull, invalid_kernel, Tuple{})
+    @not_if_sanitize @test CUDA.code_sass(devnull, valid_kernel, Tuple{}) == nothing
+    @not_if_sanitize @test_throws CUDA.KernelError CUDA.code_sass(devnull, invalid_kernel, Tuple{})
 end
 
 @testset "function name mangling" begin
@@ -133,7 +149,13 @@ end
 
     @eval kernel_341(ptr) = (@inbounds unsafe_store!(ptr, $(Symbol("dummy_^"))(unsafe_load(ptr))); nothing)
 
-    CUDA.code_sass(devnull, kernel_341, Tuple{Ptr{Int}})
+    @not_if_sanitize CUDA.code_sass(devnull, kernel_341, Tuple{Ptr{Int}})
+end
+
+@testset "device runtime" begin
+    kernel() = (CUDA.cudaGetLastError(); return)
+
+    @not_if_sanitize CUDA.code_sass(devnull, kernel, Tuple{})
 end
 
 end

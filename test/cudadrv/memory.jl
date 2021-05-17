@@ -80,10 +80,9 @@ end
 let
     src = Mem.alloc(Mem.Device, nb)
 
-    @test_throws ArgumentError unsafe_copyto!(typed_pointer(src, T), pointer(data), N; async=true)
-    unsafe_copyto!(typed_pointer(src, T), pointer(data), N; async=true, stream=CuDefaultStream())
+    unsafe_copyto!(typed_pointer(src, T), pointer(data), N; async=true)
 
-    Mem.set!(typed_pointer(src, T), zero(T), N; async=true, stream=CuDefaultStream())
+    Mem.set!(typed_pointer(src, T), zero(T), N; async=true, stream=stream())
 
     Mem.free(src)
 end
@@ -194,7 +193,7 @@ let
                        srcPitch=nx*sizeof(T), srcHeight=ny,
                        dstPitch=nx*sizeof(T), dstHeight=1)
 
-    @test all(check .== data)
+    @test check == data
 
     # copy back into a 3-D array
     check2 = zeros(T, nx, ny, nz)
@@ -204,9 +203,8 @@ let
                        dstPos=(1,2,1),
                        srcPitch=nx*sizeof(T), srcHeight=ny,
                        dstPitch=nx*sizeof(T), dstHeight=ny)
-    @test all(check2[:,2,:] .== data)
+    @test check2[:,2,:] == data
 end
-
 let
     # copying an y-z plane of a 3-D array
 
@@ -230,7 +228,7 @@ let
                        srcPitch=nx*sizeof(T), srcHeight=ny,
                        dstPitch=1*sizeof(T), dstHeight=ny)
 
-    @test all(check .== data)
+    @test check == data
 
     # copy back into a 3-D array
     check2 = zeros(T, nx, ny, nz)
@@ -240,35 +238,37 @@ let
                        dstPos=(2,1,1),
                        srcPitch=nx*sizeof(T), srcHeight=ny,
                        dstPitch=nx*sizeof(T), dstHeight=ny)
-    @test all(check2[2,:,:] .== data)
+    @test check2[2,:,:] == data
 end
+let
+    # JuliaGPU/CUDA.jl#863: wrong offset calculation
+    nx, ny, nz = 1, 2, 1
+
+    A = zeros(Int, nx, nz)
+    B = CuArray(reshape([1:(nx*ny*nz)...], (nx, ny, nz)))
+    Mem.unsafe_copy3d!(
+        pointer(A), Mem.Host, pointer(B), Mem.Device,
+        nx, 1, nz;
+        srcPos=(1,2,1),
+        srcPitch=nx*sizeof(A[1]), srcHeight=ny,
+        dstPitch=nx*sizeof(A[1]), dstHeight=1
+    )
+
+    @test A == Array(B)[:,2,:]
+end
+
 # pinned memory with existing memory
 if attribute(device(), CUDA.DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED) != 0
-    let hA = rand(UInt8, 512), hB = rand(UInt8, 512)
+    hA = rand(UInt8, 512)
+    @test !CUDA.is_pinned(pointer(hA))
     Mem.pin(hA)
-    # no way to test if something is already registered, sadly...
-    # make sure this doesn't explode -- nothing should happen if we try
-    # to register twice
+    @test CUDA.is_pinned(pointer(hA))
+
+    # make sure we can double-pin
     Mem.pin(hA)
-    # by default pin doesn't use DEVICEMAP so we'd have to memcpy
-    # just test that some basic ops work without corrupting memory
-    dA = Mem.alloc(Mem.Device, sizeof(hA))
-    TA = eltype(hA)
-    unsafe_copyto!(typed_pointer(dA, TA), pointer(hA), 512)
-    Mem.set!(typed_pointer(dA, TA), zero(TA), 512)
-    unsafe_copyto!(pointer(hA), typed_pointer(dA, TA), 512)
-    @test all(hA .== zero(TA))
-    # test with a flag
-    Mem.pin(hB, Mem.HOSTREGISTER_DEVICEMAP)
-    Mem.pin(hB)
-    # by default pin doesn't use DEVICEMAP so we'd have to memcpy
-    # just test that some basic ops work without corrupting memory
-    dB = Mem.alloc(Mem.Device, sizeof(hB))
-    TB = eltype(hB)
-    # since pin doesn't return the buffer we can't directly set
-    unsafe_copyto!(typed_pointer(dB, TB), pointer(hB), 512)
-    Mem.set!(typed_pointer(dB, TB), zero(TB), 512)
-    unsafe_copyto!(pointer(hB), typed_pointer(dB, TB), 512)
-    @test all(hB .== zero(TB))
-    end
+
+    # memory copies on pinned memory behave differently, so test that code path
+    dA = CUDA.rand(UInt8, 512)
+    copyto!(dA, hA)
+    copyto!(hA, dA)
 end

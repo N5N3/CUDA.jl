@@ -158,12 +158,18 @@ for A in (AS.Generic, AS.Global, AS.Shared)
             T_untyped_ptr = "i8 addrspace($(convert(Int, A)))*"
             T_typed_ptr = "$(T_val) addrspace($(convert(Int, A)))*"
         end
-        @eval @inline atomic_add!(ptr::LLVMPtr{$T,$A}, val::$T) = Base.llvmcall(
-            $("declare $T_val @$intr($T_typed_ptr, $T_val)",
-               "%ptr = bitcast $T_untyped_ptr %0 to $T_typed_ptr
+        mod = """
+            declare $T_val @$intr($T_typed_ptr, $T_val)
+
+            define $T_val @entry($T_untyped_ptr %0, $T_val %1) #0 {
+                %ptr = bitcast $T_untyped_ptr %0 to $T_typed_ptr
                 %rv = call $T_val @$intr($T_typed_ptr %ptr, $T_val %1)
-                ret $T_val %rv"), $T,
-            Tuple{LLVMPtr{$T,$A}, $T}, ptr, val)
+                ret $T_val %rv
+            }
+
+            attributes #0 = { alwaysinline }"""
+        @eval @inline atomic_add!(ptr::LLVMPtr{$T,$A}, val::$T) =
+            Base.llvmcall(($mod, "entry"), $T, Tuple{LLVMPtr{$T,$A}, $T}, ptr, val)
     end
 
     # declare i32 @llvm.nvvm.atomic.load.inc.32.p0i32(i32* address, i32 val)
@@ -182,6 +188,24 @@ for A in (AS.Generic, AS.Global, AS.Shared)
     end
 end
 
+# half-precision atomics using PTX instruction 
+
+for A in (AS.Generic, AS.Global, AS.Shared)
+
+    if A == AS.Global
+        scope = ".global"
+    elseif A == AS.Shared
+        scope = ".shared"
+    else
+        scope = ""
+    end
+
+    T = Symbol(Float16)
+    PTX = "atom$scope.add.noftz.f16 \$0, [\$1], \$2;"
+
+    @eval @inline atomic_add!(ptr::LLVMPtr{$T,$A}, val::$T) =
+        @Interop.asmcall($PTX, "=h,l,h", true, $T, Tuple{Core.LLVMPtr{$T,$A},$T}, ptr, val) 
+end
 
 ## Julia
 
@@ -394,6 +418,8 @@ export @atomic
 const inplace_ops = Dict(
     :(+=) => :(+),
     :(-=) => :(-),
+    :(*=) => :(*),
+    :(/=) => :(/),
     :(&=) => :(&),
     :(|=) => :(|),
     :(⊻=) => :(⊻)
@@ -462,6 +488,8 @@ end
 # CUDA.jl atomics
 for (op,impl) in [(+)      => atomic_add!,
                   (-)      => atomic_sub!,
+                  (*)      => atomic_mul!,
+                  (/)      => atomic_div!,
                   (&)      => atomic_and!,
                   (|)      => atomic_or!,
                   (⊻)      => atomic_xor!,

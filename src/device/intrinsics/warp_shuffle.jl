@@ -1,15 +1,11 @@
 # Warp Shuffle (B.14)
 
-export FULL_MASK
+# TODO: this functionality should throw <sm_30
 
 # TODO: does not work on sub-word (ie. Int16) or non-word divisible sized types
 
 # TODO: these functions should dispatch based on the actual warp size
 const ws = Int32(32)
-
-const FULL_MASK = 0xffffffff
-
-# TODO: this functionality should throw <sm_30
 
 
 # core intrinsics
@@ -69,6 +65,7 @@ shfl_recurse(op, x::Int64)  = reinterpret(Int64, shfl_recurse(op, reinterpret(UI
 shfl_recurse(op, x::Int128) = reinterpret(Int128, shfl_recurse(op, reinterpret(UInt128, x)))
 
 # floating point numbers
+shfl_recurse(op, x::Float16) = reinterpret(Float16, shfl_recurse(op, reinterpret(UInt16, x)))
 shfl_recurse(op, x::Float64) = reinterpret(Float64, shfl_recurse(op, reinterpret(UInt64, x)))
 
 # other

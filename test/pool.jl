@@ -1,6 +1,6 @@
 CUDA.alloc(0)
 
-memcheck ||  @test_throws OutOfGPUMemoryError CuArray{Int}(undef, 10^20)
+@test_throws OutOfGPUMemoryError CuArray{Int}(undef, 10^20)
 
 @testset "@allocated" begin
     @test (CUDA.@allocated CuArray{Int32}(undef,1)) == 4
@@ -33,4 +33,8 @@ end
 @testset "timings" begin
     CUDA.enable_timings()
     CUDA.disable_timings()
+end
+
+@testset "memory_status" begin
+    CUDA.memory_status(devnull)
 end

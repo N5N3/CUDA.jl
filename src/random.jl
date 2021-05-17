@@ -4,6 +4,91 @@ using Random
 
 export rand_logn!, rand_poisson!
 
+
+# native RNG
+
+"""
+    CUDA.RNG()
+
+A random number generator using `rand()` in a device kernel.
+
+See also: [CUDA.Philox2x32](@ref)
+"""
+mutable struct RNG <: AbstractRNG
+    seed::UInt32
+    counter::UInt32
+
+    function RNG(seed::Integer)
+        new(seed%UInt32, 0)
+    end
+end
+
+RNG() = RNG(Random.rand(UInt32))
+
+function Random.seed!(rng::RNG, seed::Integer)
+    rng.seed = seed % UInt32
+    rng.counter = 0
+end
+
+Random.seed!(rng::RNG) = seed!(rng, Random.rand(UInt32))
+
+function Random.rand!(rng::RNG, A::AnyCuArray)
+    function kernel(A::AbstractArray{T}, seed::UInt32, counter::UInt32) where {T}
+        device_rng = Random.default_rng()
+
+        # initialize the state
+        @inbounds Random.seed!(device_rng, seed, counter)
+
+        # grid-stride loop
+        threadId = threadIdx().x
+        offset = (blockIdx().x - 1) * blockDim().x
+        while offset < length(A)
+            i = threadId + offset
+            if i <= length(A)
+                @inbounds A[i] = Random.rand(device_rng, T)
+            end
+
+            offset += (blockDim().x - 1) * gridDim().x
+        end
+
+        return
+    end
+
+    kernel = @cuda launch=false name="rand!" kernel(A, rng.seed, rng.counter)
+    config = launch_configuration(kernel.fun; max_threads=64)
+    threads = max(32, min(config.threads, length(A)))
+    blocks = min(config.blocks, cld(length(A), threads))
+    kernel(A, rng.seed, rng.counter; threads=threads, blocks=blocks)
+
+    new_counter = Int64(rng.counter) + length(A)
+    overflow, remainder = fldmod(new_counter, typemax(UInt32))
+    rng.seed += overflow     # XXX: is this OK?
+    rng.counter = remainder
+
+    A
+end
+
+# TODO: `randn!`; cannot reuse from Base or RandomNumbers, as those do scalar indexing
+
+
+# generic functionality
+
+function Random.rand!(rng::Union{RNG,CURAND.RNG,GPUArrays.RNG}, A::AbstractArray{T}) where {T}
+    B = CuArray{T}(undef, size(A))
+    Random.rand!(rng, B)
+    copyto!(A, B)
+end
+
+function Random.rand(rng::Union{RNG,CURAND.RNG,GPUArrays.RNG}, T::Type)
+    assertscalar("scalar rand")
+    A = CuArray{T}(undef, 1)
+    Random.rand!(rng, A)
+    A[]
+end
+
+
+# RNG-less interface
+
 # the interface is split in two levels:
 # - functions that extend the Random standard library, and take an RNG as first argument,
 #   will only ever dispatch to CURAND and as a result are limited in the types they support.
@@ -41,13 +126,13 @@ rand_poisson(T::CURAND.PoissonType, dim1::Integer, dims::Integer...; kwargs...) 
     CURAND.rand_poisson(curand_rng(), T, Dims((dim1, dims...)); kwargs...)
 
 # GPUArrays in-place
-Random.rand!(A::CuArray) = Random.rand!(gpuarrays_rng(), A)
-Random.randn!(A::CuArray; kwargs...) =
+Random.rand!(A::AnyCuArray) = Random.rand!(gpuarrays_rng(), A)
+Random.randn!(A::AnyCuArray; kwargs...) =
     error("CUDA.jl does not support generating normally-distributed random numbers of type $(eltype(A))")
 # FIXME: GPUArrays.jl has a randn! nowadays, but it doesn't work with e.g. Cuint
-rand_logn!(A::CuArray; kwargs...) =
+rand_logn!(A::AnyCuArray; kwargs...) =
     error("CUDA.jl does not support generating lognormally-distributed random numbers of type $(eltype(A))")
-rand_poisson!(A::CuArray; kwargs...) =
+rand_poisson!(A::AnyCuArray; kwargs...) =
     error("CUDA.jl does not support generating Poisson-distributed random numbers of type $(eltype(A))")
 
 # GPUArrays out-of-place

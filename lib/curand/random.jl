@@ -8,33 +8,46 @@ using GPUArrays
 mutable struct RNG <: Random.AbstractRNG
     handle::curandGenerator_t
     ctx::CuContext
+    stream::CuStream
     typ::Int
 
-    function RNG(typ=CURAND_RNG_PSEUDO_DEFAULT)
+    function RNG(typ=CURAND_RNG_PSEUDO_DEFAULT; stream=stream())
         handle = curandCreateGenerator(typ)
-        curandSetStream(handle, CuStreamPerThread())
-        obj = new(handle, context(), typ)
+        if stream !== nothing
+            curandSetStream(handle, stream)
+        end
+        obj = new(handle, context(), stream, typ)
         finalizer(unsafe_destroy!, obj)
         return obj
     end
 end
 
 function unsafe_destroy!(rng::RNG)
-    CUDA.isvalid(rng.ctx) || return
-    context!(rng.ctx) do
-        curandDestroyGenerator(rng)
-    end
+    CUDA.@context! skip_destroyed=true rng.ctx curandDestroyGenerator(rng)
 end
 
 Base.unsafe_convert(::Type{curandGenerator_t}, rng::RNG) = rng.handle
+
+# RNG objects can be user-created on a different task, whose stream might be different from
+# the one used in the current task. call this function before every API call that performs
+# operations on a stream to ensure the RNG is using the correct task-local stream.
+@inline function update_stream(rng::RNG)
+    new_stream = stream()
+    if rng.stream != new_stream
+        rng.stream = new_stream
+        curandSetStream(rng, new_stream)
+    end
+    return
+end
 
 
 ## seeding
 
 function Random.seed!(rng::RNG, seed=Base.rand(UInt64), offset=0)
+    update_stream(rng)
     curandSetPseudoRandomGeneratorSeed(rng, seed)
     curandSetGeneratorOffset(rng, offset)
-    curandGenerateSeeds(rng)
+    @check unsafe_curandGenerateSeeds(rng) CURAND_STATUS_PREEXISTING_FAILURE
     return
 end
 
@@ -45,16 +58,19 @@ Random.seed!(rng::RNG, ::Nothing) = Random.seed!(rng)
 
 # uniform
 const UniformType = Union{Type{Float32},Type{Float64},Type{UInt32}}
-const UniformArray = CuArray{<:Union{Float32,Float64,UInt32}}
-function Random.rand!(rng::RNG, A::CuArray{UInt32})
+const UniformArray = DenseCuArray{<:Union{Float32,Float64,UInt32}}
+function Random.rand!(rng::RNG, A::DenseCuArray{UInt32})
+    update_stream(rng)
     curandGenerate(rng, A, length(A))
     return A
 end
-function Random.rand!(rng::RNG, A::CuArray{Float32})
+function Random.rand!(rng::RNG, A::DenseCuArray{Float32})
+    update_stream(rng)
     curandGenerateUniform(rng, A, length(A))
     return A
 end
-function Random.rand!(rng::RNG, A::CuArray{Float64})
+function Random.rand!(rng::RNG, A::DenseCuArray{Float64})
+    update_stream(rng)
     curandGenerateUniformDouble(rng, A, length(A))
     return A
 end
@@ -76,32 +92,37 @@ end
 
 # normal
 const NormalType = Union{Type{Float32},Type{Float64}}
-const NormalArray = CuArray{<:Union{Float32,Float64}}
-function Random.randn!(rng::RNG, A::CuArray{Float32}; mean=0, stddev=1)
+const NormalArray = DenseCuArray{<:Union{Float32,Float64}}
+function Random.randn!(rng::RNG, A::DenseCuArray{Float32}; mean=0, stddev=1)
+    update_stream(rng)
     inplace_pow2(A, B->curandGenerateNormal(rng, B, length(B), mean, stddev))
     return A
 end
-function Random.randn!(rng::RNG, A::CuArray{Float64}; mean=0, stddev=1)
+function Random.randn!(rng::RNG, A::DenseCuArray{Float64}; mean=0, stddev=1)
+    update_stream(rng)
     inplace_pow2(A, B->curandGenerateNormalDouble(rng, B, length(B), mean, stddev))
     return A
 end
 
 # log-normal
 const LognormalType = Union{Type{Float32},Type{Float64}}
-const LognormalArray = CuArray{<:Union{Float32,Float64}}
-function rand_logn!(rng::RNG, A::CuArray{Float32}; mean=0, stddev=1)
+const LognormalArray = DenseCuArray{<:Union{Float32,Float64}}
+function rand_logn!(rng::RNG, A::DenseCuArray{Float32}; mean=0, stddev=1)
+    update_stream(rng)
     inplace_pow2(A, B->curandGenerateLogNormal(rng, B, length(B), mean, stddev))
     return A
 end
-function rand_logn!(rng::RNG, A::CuArray{Float64}; mean=0, stddev=1)
+function rand_logn!(rng::RNG, A::DenseCuArray{Float64}; mean=0, stddev=1)
+    update_stream(rng)
     inplace_pow2(A, B->curandGenerateLogNormalDouble(rng, B, length(B), mean, stddev))
     return A
 end
 
 # poisson
 const PoissonType = Union{Type{Cuint}}
-const PoissonArray = CuArray{Cuint}
-function rand_poisson!(rng::RNG, A::CuArray{Cuint}; lambda=1)
+const PoissonArray = DenseCuArray{Cuint}
+function rand_poisson!(rng::RNG, A::DenseCuArray{Cuint}; lambda=1)
+    update_stream(rng)
     curandGeneratePoisson(rng, A, length(A), lambda)
     return A
 end

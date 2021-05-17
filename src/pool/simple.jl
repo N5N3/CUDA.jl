@@ -19,59 +19,59 @@ end
 
 ## pooling
 
-const pool_lock = ReentrantLock()
-const pool = PerDevice{Set{Block}}() do dev
-    Set{Block}()
+Base.@kwdef struct SimplePool <: AbstractPool
+    stream_ordered::Bool
+
+    lock::ReentrantLock = ReentrantLock()
+    cache::Set{Block} = Set{Block}()
+
+    freed_lock::NonReentrantLock = NonReentrantLock()
+    freed::Vector{Block} = Vector{Block}()
 end
 
-const freed_lock = NonReentrantLock()
-const freed = PerDevice{Vector{Block}}() do dev
-    Vector{Block}()
-end
-
-function scan(dev, sz)
-    @lock pool_lock for block in pool[dev]
+function scan(pool::SimplePool, sz)
+    @lock pool.lock for block in pool.cache
         if sz <= sizeof(block) <= max_oversize(sz)
-            delete!(pool[dev], block)
+            delete!(pool.cache, block)
             return block
         end
     end
     return
 end
 
-function repopulate(dev)
-    blocks = @lock freed_lock begin
-        isempty(freed[dev]) && return
-        blocks = Set(freed[dev])
-        empty!(freed[dev])
+function repopulate(pool::SimplePool)
+    blocks = @lock pool.freed_lock begin
+        isempty(pool.freed) && return
+        blocks = Set(pool.freed)
+        empty!(pool.freed)
         blocks
     end
 
-    @lock pool_lock begin
+    @lock pool.lock begin
         for block in blocks
-            @assert !in(block, pool[dev])
-            push!(pool[dev], block)
+            @assert !in(block, pool.cache)
+            push!(pool.cache, block)
         end
     end
 
     return
 end
 
-function pool_reclaim(dev, sz::Int=typemax(Int))
-    repopulate(dev)
+function reclaim(pool::SimplePool, sz::Int=typemax(Int))
+    repopulate(pool)
 
-    @lock pool_lock begin
+    @lock pool.lock begin
         freed_bytes = 0
-        while freed_bytes < sz && !isempty(pool[dev])
-            block = pop!(pool[dev])
+        while freed_bytes < sz && !isempty(pool.cache)
+            block = pop!(pool.cache)
             freed_bytes += sizeof(block)
-            actual_free(dev, block)
+            actual_free(block; pool.stream_ordered)
         end
         return freed_bytes
     end
 end
 
-function pool_alloc(dev, sz)
+function alloc(pool::SimplePool, sz; stream::CuStream)
     block = nothing
     for phase in 1:3
         if phase == 2
@@ -80,21 +80,21 @@ function pool_alloc(dev, sz)
             @pool_timeit "$phase.0 gc (full)" GC.gc(true)
         end
 
-        @pool_timeit "$phase.1 repopulate" repopulate(dev)
+        @pool_timeit "$phase.1 repopulate" repopulate(pool)
 
         @pool_timeit "$phase.2 scan" begin
-            block = scan(dev, sz)
+            block = scan(pool, sz)
         end
         block === nothing || break
 
         @pool_timeit "$phase.3 alloc" begin
-            block = actual_alloc(dev, sz)
+            block = actual_alloc(sz; pool.stream_ordered)
         end
         block === nothing || break
 
         @pool_timeit "$phase.4 reclaim + alloc" begin
-            pool_reclaim(dev, sz)
-            block = actual_alloc(dev, sz)
+            reclaim(pool, sz)
+            block = actual_alloc(sz, phase==3; pool.stream_ordered)
         end
         block === nothing || break
     end
@@ -102,21 +102,16 @@ function pool_alloc(dev, sz)
     return block
 end
 
-function pool_free(dev, block)
+function free(pool::SimplePool, block; stream::CuStream)
     # we don't do any work here to reduce pressure on the GC (spending time in finalizers)
     # and to simplify locking (preventing concurrent access during GC interventions)
-    @safe_lock_spin freed_lock begin
-        push!(freed[dev], block)
+    @spinlock pool.freed_lock begin
+        push!(pool.freed, block)
     end
 end
 
-function pool_init()
-    initialize!(pool, ndevices())
-    initialize!(freed, ndevices())
-end
-
-function cached_memory(dev=device())
-    sz = @safe_lock freed_lock mapreduce(sizeof, +, freed[dev]; init=0)
-    sz += @lock pool_lock mapreduce(sizeof, +, pool[dev]; init=0)
+function cached_memory(pool::SimplePool)
+    sz = @lock pool.freed_lock mapreduce(sizeof, +, pool.freed; init=0)
+    sz += @lock pool.lock mapreduce(sizeof, +, pool.cache; init=0)
     return sz
 end

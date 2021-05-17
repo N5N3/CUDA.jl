@@ -30,14 +30,29 @@ mutable struct CuModule
         end
         optionKeys, optionVals = encode(options)
 
-        res = GC.@preserve data unsafe_cuModuleLoadDataEx(handle_ref, pointer(data),
-                                                          length(optionKeys),
-                                                          optionKeys, optionVals)
+        # XXX: cuModuleLoadData is sensitive to memory pressure, and can segfault when
+        #      running close to OOM on CUDA 11.2 / driver 460 (NVIDIA bug #3284677).
+        #
+        #      this happens often when using the stream-ordered memory allocator, because
+        #      the reserve of available memory we try to maintain is often not actually
+        #      available, but cached by the allocator. by configuring the allocator with a
+        #      release threshold, we have it actually free up that memory, but that requires
+        #      synchronizing all streams to make sure pending frees are actually executed.
+        device_synchronize()
+
+        # FIXME: maybe all CUDA API calls need to run under retry_reclaim?
+        #        that would require a redesign of the memory pool,
+        #        so maybe do so when we replace it with CUDA 11.2's pool.
+        res = GC.@preserve data retry_reclaim(isequal(ERROR_OUT_OF_MEMORY)) do
+            unsafe_cuModuleLoadDataEx(handle_ref, pointer(data),
+                                      length(optionKeys),
+                                      optionKeys, optionVals)
+        end
         if res == ERROR_NO_BINARY_FOR_GPU ||
            res == ERROR_INVALID_IMAGE ||
            res == ERROR_INVALID_PTX
             options = decode(optionKeys, optionVals)
-            throw(CuError(res, options[JIT_ERROR_LOG_BUFFER]))
+            throw(CuError(res, unsafe_string(pointer(options[JIT_ERROR_LOG_BUFFER]))))
         elseif res != SUCCESS
             throw_api_error(res)
         end
@@ -60,9 +75,7 @@ mutable struct CuModule
 end
 
 function unsafe_unload!(mod::CuModule)
-    if isvalid(mod.ctx)
-        cuModuleUnload(mod)
-    end
+    @finalize_in_ctx mod.ctx cuModuleUnload(mod)
 end
 
 Base.unsafe_convert(::Type{CUmodule}, mod::CuModule) = mod.handle

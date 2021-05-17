@@ -49,6 +49,7 @@ const cuda_cap_db = Dict(
     v"7.2" => v"9.2":highest,
     v"7.5" => v"10.0":highest,
     v"8.0" => v"11.0":highest,
+    v"8.6" => v"11.1":highest,
 )
 
 function cuda_cap_support(ver::VersionNumber)
@@ -92,6 +93,8 @@ const cuda_ptx_db = Dict(
     v"6.4" => v"10.1":highest,
     v"6.5" => v"10.2":highest,
     v"7.0" => v"11.0":highest,
+    v"7.1" => v"11.1":highest,
+    v"7.2" => v"11.2":highest,
 )
 
 function cuda_ptx_support(ver::VersionNumber)
@@ -172,30 +175,15 @@ end
 ## high-level functions that return target and isa support
 
 function llvm_compat(version=LLVM.version())
-    # https://github.com/JuliaGPU/CUDAnative.jl/issues/428
-    if version >= v"8.0" && VERSION < v"1.3.0-DEV.547"
-        error("LLVM 8.0 requires a newer version of Julia")
-    end
-
     InitializeNVPTXTarget()
 
     cap_support = sort(collect(llvm_cap_support(version)))
-
-    ptx_support = llvm_ptx_support(version)
-    push!(ptx_support, v"6.0") # JuliaLang/julia#23817
-    ptx_support = sort(collect(ptx_support))
+    ptx_support = sort(collect(llvm_ptx_support(version)))
 
     return (cap=cap_support, ptx=ptx_support)
 end
 
 function cuda_compat(driver_release=release(), toolkit_release=toolkit_release())
-    # the toolkit version as reported contains major.minor.patch,
-    # but the version number returned by libcuda is only major.minor.
-    if toolkit_release > driver_release
-        @warn("""CUDA $toolkit_release is not supported by
-                 your driver (which supports up to $driver_release)""")
-    end
-
     driver_cap_support = cuda_cap_support(driver_release)
     toolkit_cap_support = cuda_cap_support(toolkit_release)
     cap_support = sort(collect(driver_cap_support ∩ toolkit_cap_support))
@@ -208,7 +196,7 @@ function cuda_compat(driver_release=release(), toolkit_release=toolkit_release()
 end
 
 # select the highest capability that is supported by both the toolchain and device
-function supported_capability(dev::CuDevice)
+@memoize function supported_capability(dev::CuDevice)
     dev_cap = capability(dev)
     compat_caps = filter(cap -> cap <= dev_cap, target_support())
     isempty(compat_caps) &&

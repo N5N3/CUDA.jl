@@ -27,6 +27,7 @@ mutable struct CuLink
             "JIT compiling code" # FIXME: remove this useless message
         end
         if Base.JLOptions().debug_level == 1
+            # XXX: does not apply to the linker
             options[JIT_GENERATE_LINE_INFO] = true
         elseif Base.JLOptions().debug_level >= 2
             options[JIT_GENERATE_DEBUG_INFO] = true
@@ -43,15 +44,19 @@ mutable struct CuLink
 end
 
 function unsafe_destroy!(link::CuLink)
-    if isvalid(link.ctx)
-        cuLinkDestroy(link)
-    end
+    @finalize_in_ctx link.ctx cuLinkDestroy(link)
 end
 
 Base.unsafe_convert(::Type{CUlinkState}, link::CuLink) = link.handle
 
 Base.:(==)(a::CuLink, b::CuLink) = a.handle == b.handle
 Base.hash(link::CuLink, h::UInt) = hash(link.handle, h)
+
+function Base.show(io::IO, link::CuLink)
+    print(io, "CuLink(")
+    @printf(io, "%p", link.handle)
+    print(io, ", ", link.ctx, ")")
+end
 
 """
     add_data!(link::CuLink, name::String, code::String)
@@ -64,7 +69,15 @@ function add_data!(link::CuLink, name::String, code::String)
     # there shouldn't be any embedded NULLs
     checked_data = Base.unsafe_convert(Cstring, data)
 
-    cuLinkAddData_v2(link, JIT_INPUT_PTX, pointer(checked_data), length(data), name, 0, C_NULL, C_NULL)
+    res = unsafe_cuLinkAddData_v2(link, JIT_INPUT_PTX, pointer(checked_data), length(data),
+                                  name, 0, C_NULL, C_NULL)
+    if res == ERROR_NO_BINARY_FOR_GPU ||
+       res == ERROR_INVALID_IMAGE ||
+       res == ERROR_INVALID_PTX
+        throw(CuError(res, unsafe_string(pointer(link.options[JIT_ERROR_LOG_BUFFER]))))
+    elseif res != SUCCESS
+        throw_api_error(res)
+    end
 end
 
 """
@@ -73,9 +86,17 @@ end
 Add object code to a pending link operation.
 """
 function add_data!(link::CuLink, name::String, data::Vector{UInt8})
-    cuLinkAddData_v2(link, JIT_INPUT_OBJECT, pointer(data), length(data), name, 0, C_NULL, C_NULL)
+    res = unsafe_cuLinkAddData_v2(link, JIT_INPUT_OBJECT, pointer(data), length(data),
+                                  name, 0, C_NULL, C_NULL)
+    if res == ERROR_NO_BINARY_FOR_GPU ||
+       res == ERROR_INVALID_IMAGE ||
+       res == ERROR_INVALID_PTX
+        throw(CuError(res, unsafe_string(pointer(link.options[JIT_ERROR_LOG_BUFFER]))))
+    elseif res != SUCCESS
+        throw_api_error(res)
+    end
 
-    return nothing
+    return
 end
 
 """

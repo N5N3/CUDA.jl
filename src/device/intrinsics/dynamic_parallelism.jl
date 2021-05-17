@@ -1,5 +1,34 @@
 # E. Dynamic Parallelism
 
+## error handling
+
+# TODO: generalize for all uses of cudadevrt
+
+struct CuDeviceError <: Exception
+    code::cudaError
+end
+
+Base.convert(::Type{cudaError_t}, err::CuDeviceError) = err.code
+
+name(err::CuDeviceError) = cudaGetErrorName(err)
+
+description(err::CuDeviceError) = cudaGetErrorString(err)
+
+@noinline function throw_device_cuerror(err::CuDeviceError)
+    # the exception won't be rendered on the host, so print some details here already
+    @cuprintln("ERROR: a CUDA error was thrown during kernel execution: $(description(err)) (code $(Int(err.code)), $(name(err)))")
+    throw(err)
+end
+
+macro check_status(ex)
+    quote
+        res = $(esc(ex))
+        if res != cudaSuccess
+            throw_device_cuerror(CuDeviceError(res))
+        end
+    end
+end
+
 
 ## streams
 
@@ -10,33 +39,41 @@ struct CuDeviceStream
 
     function CuDeviceStream(flags=cudaStreamNonBlocking)
         handle_ref = Ref{cudaStream_t}()
-        cudaStreamCreateWithFlags(handle_ref, flags)
+        @check_status cudaStreamCreateWithFlags(handle_ref, flags)
         return new(handle_ref[])
     end
+
+    global CuDefaultDeviceStream() = new(convert(cudaStream_t, C_NULL))
 end
 
 Base.unsafe_convert(::Type{cudaStream_t}, s::CuDeviceStream) = s.handle
 
 function unsafe_destroy!(s::CuDeviceStream)
-    cudaStreamDestroy(s)
+    @check_status cudaStreamDestroy(s)
     return
 end
 
 
 ## execution
 
-# device-side counterpart of launch
-@inline function device_launch(f, blocks, threads, shmem, stream, args...)
+struct CuDeviceFunction
+    ptr::Ptr{Cvoid}
+end
+
+Base.unsafe_convert(::Type{Ptr{Cvoid}}, fun::CuDeviceFunction) = fun.ptr
+
+function launch(f::CuDeviceFunction, args::Vararg{Any,N}; blocks::CuDim=1, threads::CuDim=1,
+                shmem::Integer=0, stream::CuDeviceStream=CuDefaultDeviceStream()) where {N}
     blockdim = CuDim3(blocks)
     threaddim = CuDim3(threads)
 
     buf = parameter_buffer(f, blockdim, threaddim, shmem, args...)
-    cudaLaunchDeviceV2(buf, stream)
+    @check_status cudaLaunchDeviceV2(buf, stream)
 
     return
 end
 
-@generated function parameter_buffer(f, blocks, threads, shmem, args...)
+@generated function parameter_buffer(f::CuDeviceFunction, blocks, threads, shmem, args...)
     # allocate a buffer
     ex = quote
         Base.@_inline_meta
@@ -73,13 +110,8 @@ end
 
 ## synchronization
 
-"""
-    device_synchronize()
-
-Wait for the device to finish. This is the device side version,
-and should not be called from the host.
-
-`device_synchronize` acts as a synchronization point for
-child grids in the context of dynamic parallelism.
-"""
-device_synchronize() = cudaDeviceSynchronize()
+@device_override device_synchronize() = @check_status cudaDeviceSynchronize()
+@doc """
+On the device, `device_synchronize` acts as a synchronization point for child grids in the
+context of dynamic parallelism.
+""" device_synchronize

@@ -8,18 +8,6 @@ dummy() = return
 @test_throws MethodError @cuda dummy(1)
 
 
-@testset "low-level interface" begin
-    k = cufunction(dummy)
-    k()
-    k(; threads=1)
-
-    CUDA.version(k)
-    CUDA.memory(k)
-    CUDA.registers(k)
-    CUDA.maxthreads(k)
-end
-
-
 @testset "launch configuration" begin
     @cuda dummy()
 
@@ -30,19 +18,37 @@ end
     @cuda blocks=1 dummy()
     @cuda blocks=(1,1) dummy()
     @cuda blocks=(1,1,1) dummy()
+end
 
-    @cuda config=(kernel)->() dummy()
-    @cuda config=(kernel)->(threads=1,) dummy()
-    @cuda config=(kernel)->(blocks=1,) dummy()
-    @cuda config=(kernel)->(shmem=0,) dummy()
+
+@testset "launch=false" begin
+    k = @cuda launch=false dummy()
+    k()
+    k(; threads=1)
+
+    CUDA.version(k)
+    CUDA.memory(k)
+    CUDA.registers(k)
+    CUDA.maxthreads(k)
 end
 
 
 @testset "compilation params" begin
     @cuda dummy()
 
-    memcheck || @test_throws CuError @cuda threads=2 maxthreads=1 dummy()
+    @test_throws CuError @cuda threads=2 maxthreads=1 dummy()
     @cuda threads=2 dummy()
+end
+
+
+@testset "inference" begin
+    foo() = @cuda dummy()
+    @inferred foo()
+
+    # with arguments, we call cudaconvert
+    kernel(a) = return
+    bar(a) = @cuda kernel(a)
+    @inferred bar(CuArray([1]))
 end
 
 
@@ -52,14 +58,14 @@ end
     CUDA.code_warntype(devnull, dummy, Tuple{})
     CUDA.code_llvm(devnull, dummy, Tuple{})
     CUDA.code_ptx(devnull, dummy, Tuple{})
-    memcheck || CUDA.code_sass(devnull, dummy, Tuple{})
+    @not_if_sanitize CUDA.code_sass(devnull, dummy, Tuple{})
 
     @device_code_lowered @cuda dummy()
     @device_code_typed @cuda dummy()
     @device_code_warntype io=devnull @cuda dummy()
     @device_code_llvm io=devnull @cuda dummy()
     @device_code_ptx io=devnull @cuda dummy()
-    memcheck || @device_code_sass io=devnull @cuda dummy()
+    @not_if_sanitize @device_code_sass io=devnull @cuda dummy()
 
     mktempdir() do dir
         @device_code dir=dir @cuda dummy()
@@ -71,7 +77,7 @@ end
     @test occursin("julia_dummy", sprint(io->(@device_code_llvm io=io optimize=false @cuda dummy())))
     @test occursin("julia_dummy", sprint(io->(@device_code_llvm io=io @cuda dummy())))
     @test occursin("julia_dummy", sprint(io->(@device_code_ptx io=io @cuda dummy())))
-    memcheck || @test occursin("julia_dummy", sprint(io->(@device_code_sass io=io @cuda dummy())))
+    @not_if_sanitize @test occursin("julia_dummy", sprint(io->(@device_code_sass io=io @cuda dummy())))
 
     # make sure invalid kernels can be partially reflected upon
     let
@@ -152,7 +158,6 @@ end
 
     _, out = @grab_output begin
         @cuda kernel(1, 2, 3)
-        synchronize()
     end
     @test out == "2"
 end
@@ -211,10 +216,8 @@ end
 
 
 @testset "scalar through single-value array, using device function" begin
-    function child(a, i)
-        return a[i]
-    end
-    @noinline function parent(a, x)
+    @noinline child(a, i) = a[i]
+    function parent(a, x)
         i = (blockIdx().x-1) * blockDim().x + threadIdx().x
         max = gridDim().x * blockDim().x
         if i == max
@@ -427,6 +430,24 @@ end
     @test Array(a_dev) ≈ [2.]
 end
 
+@testset "closure as arguments" begin
+    function kernel(closure)
+        closure()
+        return
+    end
+    function outer(a_dev, val)
+        f() = a_dev[] = val
+        @cuda kernel(f)
+    end
+
+    a = [1.]
+    a_dev = CuArray(a)
+
+    outer(a_dev, 2.)
+
+    @test Array(a_dev) ≈ [2.]
+end
+
 @testset "conversions" begin
     @eval struct Host   end
     @eval struct Device end
@@ -447,6 +468,18 @@ end
             return
         end
         @cuda kernel(arg, out_dev)
+        @test Array(out_dev) ≈ [2]
+    end
+
+    # convert captured variables
+    out_dev = CuArray(out)
+    let arg = Host()
+        @test Array(out_dev) ≈ [0]
+        function kernel(out)
+            out[] = convert(Int, arg)
+            return
+        end
+        @cuda kernel(out_dev)
         @test Array(out_dev) ≈ [2]
     end
 
@@ -803,7 +836,6 @@ end
 
     _, out = @grab_output begin
         @cuda hello()
-        synchronize()
     end
     @test out == "Hello, World!"
 end
@@ -818,12 +850,10 @@ end
 
     _, out = @grab_output begin
         @cuda hello()
-        synchronize()
     end
     @test out == "Hello, World!"
 end
 
-if VERSION >= v"1.1" # behavior of captured variables (box or not) has improved over time
 @testset "closures" begin
     function hello()
         x = 1
@@ -835,10 +865,8 @@ if VERSION >= v"1.1" # behavior of captured variables (box or not) has improved 
 
     _, out = @grab_output begin
         @cuda hello()
-        synchronize()
     end
     @test out == "Hello, World 1!"
-end
 end
 
 @testset "argument passing" begin
@@ -855,7 +883,6 @@ end
                  (Int16(1), Int64(2), Int32(3)))    # mixed
         _, out = @grab_output begin
             @cuda kernel(args...)
-            synchronize()
         end
         @test out == "1 2 3"
     end
@@ -891,7 +918,6 @@ end
 
     _, out = @grab_output begin
         @cuda kernel(true)
-        synchronize()
     end
     @test out == "recurse stop"
 end
@@ -922,7 +948,6 @@ end
 
     _, out = @grab_output begin
         @cuda kernel_a(true)
-        synchronize()
     end
     @test out == "a b c recurse a b c stop"
 end
@@ -943,7 +968,6 @@ end
 
     _, out = @grab_output begin
         @cuda hello()
-        synchronize()
     end
     @test out == "Hello, World!"
 end
@@ -972,6 +996,32 @@ end
     end
 end
 
+@testset "many arguments" begin
+    # JuliaGPU/CUDA.jl#401
+    function dp_5arg_kernel(v1, v2, v3, v4, v5)
+        return nothing
+    end
+
+    function dp_6arg_kernel(v1, v2, v3, v4, v5, v6)
+        return nothing
+    end
+
+    function main_5arg_kernel()
+        @cuda threads=1 dynamic=true dp_5arg_kernel(1, 1, 1, 1, 1)
+        return nothing
+    end
+
+    function main_6arg_kernel()
+        @cuda threads=1 dynamic=true dp_6arg_kernel(1, 1, 1, 1, 1, 1)
+        return nothing
+    end
+
+    @cuda threads=1 dp_5arg_kernel(1, 1, 1, 1, 1)
+    @cuda threads=1 dp_6arg_kernel(1, 1, 1, 1, 1, 1)
+    @cuda threads=1 main_5arg_kernel()
+    @cuda threads=1 main_6arg_kernel()
+end
+
 end
 
 ############################################################################################
@@ -988,15 +1038,43 @@ if capability(device()) >= v"6.0" && attribute(device(), CUDA.DEVICE_ATTRIBUTE_C
         return nothing
     end
 
-    a = round.(rand(Float32, (300, 40)) * 100)
-    b = round.(rand(Float32, (300, 40)) * 100)
-    c = zeros(Float32, (300, 40))
+    # cooperative kernels are additionally limited in the number of blocks that can be launched
+    maxBlocks = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+    kernel = cufunction(kernel_vadd, NTuple{3, CuDeviceArray{Float32,2,AS.Global}})
+    maxThreads = CUDA.maxthreads(kernel)
+
+    a = rand(Float32, maxBlocks, maxThreads)
+    b = rand(Float32, size(a)) * 100
+    c = similar(a)
     d_a = CuArray(a)
     d_b = CuArray(b)
     d_c = CuArray(c)  # output array
-    @cuda cooperative=true threads=600 blocks=20 kernel_vadd(d_a, d_b, d_c)
+
+    @cuda cooperative=true threads=maxThreads blocks=maxBlocks kernel_vadd(d_a, d_b, d_c)
+
     c = Array(d_c)
     @test all(c[1] .== c)
+end
+
+end
+
+############################################################################################
+
+@testset "contextual dispatch" begin
+
+@test_throws ErrorException CUDA.saturate(1f0)  # CUDA.jl#60
+
+@test testf(a->broadcast(x->x^1.5, a), rand(Float32, 1))    # CUDA.jl#71
+@test testf(a->broadcast(x->1.0^x, a), rand(Int, 1))        # CUDA.jl#76
+@test testf(a->broadcast(x->x^4, a), rand(Float32, 1))      # CUDA.jl#171
+
+@test argmax(cu([true false; false true])) == CartesianIndex(1, 1)  # CUDA.jl#659
+
+# CUDA.jl#42
+@test testf([Complex(1f0,2f0)]) do a
+    b = sincos.(a)
+    s,c = first(collect(b))
+    (real(s), imag(s), real(c), imag(c))
 end
 
 end

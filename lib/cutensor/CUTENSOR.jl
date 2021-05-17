@@ -8,6 +8,11 @@ using ..CUDA: libcutensor,  @retry_reclaim
 
 using CEnum
 
+using Memoize
+
+using DataStructures
+
+
 const cudaDataType_t = cudaDataType
 
 # core library
@@ -22,35 +27,26 @@ include("wrappers.jl")
 # high-level integrations
 include("interfaces.jl")
 
-# thread cache for task-local library handles
-const thread_handles = Vector{Union{Nothing,Ref{cutensorHandle_t}}}()
+# cache for created, but unused handles
+const idle_handles = HandleCache{CuContext,Base.RefValue{cutensorHandle_t}}()
 
 function handle()
-    tid = Threads.threadid()
-    if @inbounds thread_handles[tid] === nothing
-        ctx = context()
-        thread_handles[tid] = get!(task_local_storage(), (:CUTENSOR, ctx)) do
+    ctx = context()
+    get!(task_local_storage(), (:CUTENSOR, ctx)) do
+        handle = pop!(idle_handles, ctx) do
             handle = Ref{cutensorHandle_t}()
             cutensorInit(handle)
             handle
         end
-    end
-    @inbounds thread_handles[tid]
-end
 
-function __init__()
-    resize!(thread_handles, Threads.nthreads())
-    fill!(thread_handles, nothing)
+        finalizer(current_task()) do task
+            push!(idle_handles, ctx, handle) do
+                # CUTENSOR doesn't need to actively destroy its handle
+            end
+        end
 
-    CUDA.atdeviceswitch() do
-        tid = Threads.threadid()
-        thread_handles[tid] = nothing
-    end
-
-    CUDA.attaskswitch() do
-        tid = Threads.threadid()
-        thread_handles[tid] = nothing
-    end
+        handle
+    end::Base.RefValue{cutensorHandle_t}
 end
 
 end

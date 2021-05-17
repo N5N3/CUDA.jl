@@ -1,18 +1,22 @@
 # dummy allocator that passes through any requests, calling into the GC if that fails.
 
-pool_init() = return
+Base.@kwdef struct NoPool <: AbstractPool
+    stream_ordered::Bool
+end
 
-function pool_alloc(dev, sz)
+function alloc(pool::NoPool, sz; stream::CuStream)
     block = nothing
-    for phase in 1:3
+    for phase in 1:4
         if phase == 2
             @pool_timeit "$phase.0 gc (incremental)" GC.gc(false)
         elseif phase == 3
             @pool_timeit "$phase.0 gc (full)" GC.gc(true)
+        elseif phase == 4 && pool.stream_ordered
+            @pool_timeit "$phase.0 synchronize" device_synchronize()
         end
 
         @pool_timeit "$phase.1 alloc" begin
-            block = actual_alloc(dev, sz)
+            block = actual_alloc(sz, phase==3; pool.stream_ordered, stream)
         end
         block === nothing || break
     end
@@ -20,11 +24,11 @@ function pool_alloc(dev, sz)
     return block
 end
 
-function pool_free(dev, block)
-    actual_free(dev, block)
+function free(pool::NoPool, block; stream::CuStream)
+    actual_free(block; pool.stream_ordered, stream)
     return
 end
 
-pool_reclaim(dev, target_bytes::Int=typemax(Int)) = return 0
+reclaim(pool::NoPool, target_bytes::Int=typemax(Int)) = return 0
 
-cached_memory(dev=device()) = 0
+cached_memory(pool::NoPool) = 0
